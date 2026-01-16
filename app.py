@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from tefaspy import Crawler
+from tefas import Crawler
 from datetime import datetime, timedelta
 
 # Sayfa Yapılandırması
