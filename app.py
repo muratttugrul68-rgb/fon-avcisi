@@ -8,16 +8,16 @@ import time
 # --- SAYFA YAPILANDIRMASI ---
 st.set_page_config(page_title="OKS Fon Avcısı", layout="wide", initial_sidebar_state="expanded")
 
-st.title("🛡️ OKS Fon Performans Denetçisi")
-st.markdown("*Veri Kaynağı: TEFAS (Emeklilik Gözetim Merkezi)*")
+st.title("🛡️ OKS/BES Fon Performans Denetçisi")
+st.markdown("*Veri Kaynağı: TEFAS | Objektif Analiz*")
 
 # --- SIDEBAR (AYARLAR) ---
-st.sidebar.header("⚙️ Ayarlar")
+st.sidebar.header("⚙️ Filtre Ayarları")
 
-# 1. Filtre Ayarı
-show_all = st.sidebar.checkbox("Tüm BES Fonlarını Göster", value=False, help="İşaretlersen Gönüllü BES fonları da listeye dahil olur.")
+# 1. OKS TİKİ KUTUSU (İsteğin Üzerine Eklendi)
+only_oks = st.sidebar.checkbox("Sadece OKS Fonları", value=True, help="Seçiliyse sadece Otomatik Katılım fonlarını listeler.")
 
-# 2. Portföy (BURAYI KENDİ FONLARINLA GÜNCELLEMEYİ UNUTMA)
+# 2. Portföy
 default_funds = "VGA,VEG,ALR,CHG,AH1" 
 user_funds_input = st.sidebar.text_input("Takip Ettiğim Fonlar:", default_funds)
 user_funds = [x.strip().upper() for x in user_funds_input.split(',')]
@@ -34,7 +34,7 @@ def get_data(days):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
     
-    # 3 KERE DENEME DÖNGÜSÜ
+    # 3 KERE DENEME DÖNGÜSÜ (Bağlantı hatasına karşı)
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -45,7 +45,6 @@ def get_data(days):
                 kind="EMK"
             )
             
-            # Eğer veri geldiyse ve boş değilse döngüyü kır, başarı!
             if df is not None and not df.empty:
                 # Sütunları düzenle ve çık
                 df = df.rename(columns={"code": "fonkodu", "title": "fonadi", "price": "fiyat", "date": "tarih"})
@@ -54,32 +53,27 @@ def get_data(days):
                 return df
                 
         except Exception as e:
-            # Hata verirse bekle ve tekrar dene
-            time.sleep(2) # 2 saniye nefes al
+            time.sleep(2) # Hata varsa 2 saniye bekle tekrar dene
             continue
 
-    # 3 kere denedi yine olmadıysa boş dön
     return pd.DataFrame()
 
 # --- ANA AKIŞ ---
 try:
-    with st.spinner(f'Son {lookback_days} günün verileri sunucudan isteniyor...'):
+    with st.spinner(f'Son {lookback_days} günün verileri analiz ediliyor...'):
         df = get_data(lookback_days)
 
     if df.empty:
-        st.error("⚠️ TEFAS sunucuları şu an yanıt vermiyor veya çok yoğun. Lütfen 1-2 dakika bekleyip sayfayı yenileyin.")
+        st.error("⚠️ TEFAS sunucularından veri alınamadı. Lütfen sayfayı yenileyin.")
         st.stop()
 
-    # --- AKILLI FİLTRE (OKS) ---
-    if not show_all:
-        mask = (
-            df['fonadi'].str.contains('OKS|OTOMATİK', case=False, na=False) | 
-            df['fonkodu'].isin(user_funds)
-        )
-        filtered_df = df[mask]
+    # --- FİLTRELEME MANTIĞI ---
+    if only_oks:
+        # Sadece OKS fonlarını tut
+        filtered_df = df[df['fonadi'].str.contains('OKS|OTOMATİK', case=False, na=False)]
         
         if filtered_df.empty:
-            st.warning("⚠️ OKS filtresi sonucunda veri bulunamadı. Tüm fonlar gösteriliyor.")
+            st.warning("⚠️ OKS filtresi sonucunda veri bulunamadı. Filtre geçici olarak kaldırılıyor.")
         else:
             df = filtered_df
 
@@ -95,11 +89,14 @@ try:
     names = df[['fonkodu', 'fonadi']].drop_duplicates(subset='fonkodu', keep='last').set_index('fonkodu')
     league = league.join(names, on='Fon Kodu')
     
+    # Sıralama (En çok kazandıran en üstte)
     league = league.sort_values('Getiri (%)', ascending=False).reset_index(drop=True)
     league['Getiri (%)'] = league['Getiri (%)'].round(2)
 
     # --- EKRAN GÖRÜNTÜSÜ ---
-    st.header(f"🏆 {'Tüm Emeklilik' if show_all else 'OKS'} Ligi ({lookback_days} Gün)")
+    
+    # Başlık değişir: "OKS Ligi" veya "Tüm Emeklilik Ligi"
+    st.header(f"🏆 {'OKS' if only_oks else 'Tüm Emeklilik'} Ligi ({lookback_days} Gün)")
     
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -138,7 +135,11 @@ try:
                 fig = px.line(chart_data, x='tarih', y='fiyat', title=f"{code} Fiyat Grafiği")
                 st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("Seçtiğin fonlar bu listede yok. Sol menüden 'Tümünü Göster'i deneyebilirsin.")
+        # Eğer OKS seçiliyse ve senin fonun OKS değilse burada uyarı verir
+        msg = "Seçtiğin fonlar listede yok."
+        if only_oks:
+            msg += " (Not: 'Sadece OKS' kutusu işaretli, senin fonun OKS olmayabilir mi?)"
+        st.warning(msg)
 
 except Exception as e:
     st.error(f"Beklenmedik bir hata oluştu: {e}")
