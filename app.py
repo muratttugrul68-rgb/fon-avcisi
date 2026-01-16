@@ -4,99 +4,146 @@ from tefas import Crawler
 from datetime import datetime, timedelta
 import plotly.express as px
 
-# --- SAYFA AYARLARI ---
-st.set_page_config(page_title="OKS/BEFAS Ham Veri", layout="wide")
+# --- SAYFA YAPILANDIRMASI ---
+st.set_page_config(page_title="OKS Fon Avcısı", layout="wide", initial_sidebar_state="expanded")
 
-st.title("🛡️ TEFAS/BEFAS Tüm Fonlar (Filtresiz)")
-st.markdown(f"Veri Kaynağı: [TEFAS Emeklilik](https://www.tefas.gov.tr/FonKarsilastirma.aspx?type=emk)")
+st.title("🛡️ OKS Fon Performans Denetçisi")
+st.markdown("*Veri Kaynağı: TEFAS (Emeklilik Gözetim Merkezi)*")
 
-# --- SIDEBAR ---
+# --- SIDEBAR (AYARLAR) ---
 st.sidebar.header("⚙️ Ayarlar")
-lookback_days = st.sidebar.selectbox("Geriye Dönük Gün Sayısı:", [30, 90, 180], index=0)
 
-# --- VERİ ÇEKME (FİLTRESİZ) ---
-@st.cache_data(ttl=600)
-def get_all_data(days):
+# 1. Filtre Ayarı
+show_all = st.sidebar.checkbox("Tüm BES Fonlarını Göster", value=False, help="İşaretlersen Gönüllü BES fonları da listeye dahil olur.")
+
+# 2. Portföy
+default_funds = "VGA,VEG,ALR,CHG,AH1" 
+user_funds_input = st.sidebar.text_input("Takip Ettiğim Fonlar:", default_funds)
+user_funds = [x.strip().upper() for x in user_funds_input.split(',')]
+
+# 3. Süre ve Enflasyon
+lookback_days = st.sidebar.selectbox("Analiz Süresi:", [30, 90, 180, 365], index=0)
+st.sidebar.markdown("---")
+inflation_rate = st.sidebar.number_input("Aylık Enflasyon Tahmini (%):", value=3.0, step=0.1)
+
+# --- VERİ MOTORU ---
+@st.cache_data(ttl=3600)
+def get_data(days):
     crawler = Crawler()
-    
-    # Tarih Aralığı (Geniş tutuyoruz ki veri kesin gelsin)
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
     
-    start_str = start_date.strftime("%Y-%m-%d")
-    end_str = end_date.strftime("%Y-%m-%d")
-    
-    # kind="EMK" -> Emeklilik Fonları (BES + OKS)
-    # Bu komut senin verdiğin linkteki veriyi çeker.
+    # Veri Çekme (EMK = Emeklilik Fonları)
     try:
-        df = crawler.fetch(start=start_str, end=end_str, kind="EMK")
+        df = crawler.fetch(
+            start=start_date.strftime("%Y-%m-%d"), 
+            end=end_date.strftime("%Y-%m-%d"), 
+            kind="EMK"
+        )
     except Exception as e:
-        st.error(f"Veri çekme hatası: {e}")
         return pd.DataFrame()
-        
+
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # Sütun isimlerini düzelt
+    # Düzenleme
     df = df.rename(columns={"code": "fonkodu", "title": "fonadi", "price": "fiyat", "date": "tarih"})
     df['tarih'] = pd.to_datetime(df['tarih'])
     df['fiyat'] = df['fiyat'].astype(float)
     
     return df
 
-# --- ANA EKRAN ---
-with st.spinner('TEFAS sunucularından ham veri çekiliyor...'):
-    df = get_all_data(lookback_days)
+# --- ANA AKIŞ ---
+try:
+    with st.spinner(f'Son {lookback_days} günün verileri işleniyor...'):
+        df = get_data(lookback_days)
 
-if df.empty:
-    st.error("Veri gelmedi! TEFAS sunucularında sorun olabilir veya bugün resmi tatil/haftasonu olduğu için fiyat oluşmamış olabilir.")
-    st.stop()
+    if df.empty:
+        st.error("Veri sunucudan alınamadı. Lütfen daha sonra tekrar deneyin.")
+        st.stop()
 
-# Son günün verilerini al (Fon listesi için)
-last_date = df['tarih'].max()
-latest_df = df[df['tarih'] == last_date].copy()
+    # --- AKILLI FİLTRE (OKS) ---
+    # Eğer kullanıcı "Tümünü Göster" demediyse, sadece OKS'leri tut
+    if not show_all:
+        # İçinde OKS, OTOMATİK geçenleri VEYA kullanıcının listesindeki kodları tut
+        mask = (
+            df['fonadi'].str.contains('OKS|OTOMATİK', case=False, na=False) | 
+            df['fonkodu'].isin(user_funds)
+        )
+        filtered_df = df[mask]
+        
+        # Eğer filtre çok sıkı olduysa ve veri kalmadıysa uyar
+        if filtered_df.empty:
+            st.warning("⚠️ OKS filtresi sonucunda veri bulunamadı. Tüm fonlar gösteriliyor.")
+            filtered_df = df
+        else:
+            df = filtered_df
 
-# --- İSTATİSTİK ---
-total_funds = len(latest_df['fonkodu'].unique())
-oks_count = latest_df['fonadi'].str.contains('OKS|OTOMATİK', case=False).sum()
+    # --- MATEMATİK ---
+    # Pivot Tablo (Tarih x Fon)
+    pivot = df.pivot(index='tarih', columns='fonkodu', values='fiyat').ffill().bfill()
+    
+    # Getiri Hesabı
+    first = pivot.iloc[0]
+    last = pivot.iloc[-1]
+    returns = ((last - first) / first) * 100
+    
+    # Tabloyu Oluştur
+    league = pd.DataFrame({'Fon Kodu': returns.index, 'Getiri (%)': returns.values})
+    
+    # İsimleri Ekle
+    names = df[['fonkodu', 'fonadi']].drop_duplicates(subset='fonkodu', keep='last').set_index('fonkodu')
+    league = league.join(names, on='Fon Kodu')
+    
+    # Sıralama ve Format
+    league = league.sort_values('Getiri (%)', ascending=False).reset_index(drop=True)
+    league['Getiri (%)'] = league['Getiri (%)'].round(2)
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Toplam Emeklilik Fonu", total_funds)
-c2.metric("Tespit Edilen OKS Fonu", oks_count)
-c3.info(f"Son Veri Tarihi: {last_date.strftime('%d.%m.%Y')}")
+    # --- EKRAN GÖRÜNTÜSÜ ---
+    
+    # 1. Lig Tablosu
+    st.header(f"🏆 {'Tüm Emeklilik' if show_all else 'OKS'} Ligi ({lookback_days} Gün)")
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.dataframe(league.head(20), use_container_width=True)
+    with col2:
+        top = league.iloc[0]
+        st.info("📊 Pazar Özeti")
+        st.metric("🥇 Lider Fon", top['Fon Kodu'], f"%{top['Getiri (%)']}")
+        st.metric("Ortalama Getiri", f"%{league['Getiri (%)'].mean():.2f}")
+        st.caption(f"Veri Tarihi: {df['tarih'].max().strftime('%d.%m.%Y')}")
 
-# --- ARAMA VE KONTROL ---
-st.markdown("### 🔍 Fon Arama & Kontrol")
-st.markdown("Aşağıdaki kutuya **'OKS'** yazarak listenin içinde olup olmadıklarını gözünle görebilirsin.")
+    # 2. Benim Karnem
+    st.markdown("---")
+    st.header("🔍 Portföy Analizi")
+    
+    my_portfolio = league[league['Fon Kodu'].isin(user_funds)]
+    
+    if not my_portfolio.empty:
+        for _, row in my_portfolio.iterrows():
+            code = row['Fon Kodu']
+            ret = row['Getiri (%)']
+            rank = row.name + 1 # (Index 0'dan başladığı için +1)
+            
+            with st.expander(f"📌 {code} - {row['fonadi']}", expanded=True):
+                k1, k2, k3 = st.columns(3)
+                k1.metric("Net Getiri", f"%{ret}")
+                k2.metric("Sıralama", f"{rank} / {len(league)}")
+                
+                # Enflasyon Kontrolü
+                target = inflation_rate * (lookback_days/30)
+                if ret < target:
+                    k3.error(f"⚠️ Zarardasın (Hedef: %{target:.1f})")
+                else:
+                    k3.success("✅ Kârdasın")
+                
+                # Grafik
+                chart_data = df[df['fonkodu'] == code]
+                fig = px.line(chart_data, x='tarih', y='fiyat', title=f"{code} Fiyat Grafiği")
+                st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("Seçtiğin fonlar bu listede yok. Sol menüden 'Tümünü Göster'i deneyebilirsin.")
 
-search_term = st.text_input("Fon Adı veya Kodu Ara:", "OKS")
-
-# Arama Filtresi
-if search_term:
-    filtered_df = latest_df[
-        latest_df['fonadi'].str.contains(search_term, case=False) | 
-        latest_df['fonkodu'].str.contains(search_term, case=False)
-    ]
-else:
-    filtered_df = latest_df
-
-# Tabloyu Göster
-st.dataframe(
-    filtered_df[['fonkodu', 'fonadi', 'fiyat']].sort_values('fonadi'), 
-    use_container_width=True,
-    hide_index=True
-)
-
-# --- PORTFÖY TESTİ ---
-st.markdown("---")
-st.subheader("🧪 Portföy Testi")
-my_codes = st.text_input("Test etmek istediğin fon kodları (Virgülle):", "VGA,VEG,CHG,ALR")
-my_list = [x.strip().upper() for x in my_codes.split(',')]
-
-found_funds = latest_df[latest_df['fonkodu'].isin(my_list)]
-
-if not found_funds.empty:
-    st.success("✅ Aşağıdaki fonlar sistemde BULUNDU:")
-    st.table(found_funds[['fonkodu', 'fonadi', 'fiyat']])
-else:
-    st.error("❌ Yazdığın fonlar listede BULUNAMADI. İsimlerde hata olabilir mi?")
+except Exception as e:
+    st.error(f"Beklenmedik bir hata oluştu: {e}")
