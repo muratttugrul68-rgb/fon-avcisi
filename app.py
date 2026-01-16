@@ -7,8 +7,8 @@ import plotly.express as px
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="OKS Fon Avcısı", layout="wide", initial_sidebar_state="expanded")
 
-st.title("🛡️ OKS/BES Fon Performans Denetçisi")
-st.markdown("*Objektif Veri Analizi: Duygulara yer yok, sadece matematik.*")
+st.title("🛡️ OKS Fon Performans Denetçisi")
+st.markdown("*Objektif Veri Analizi: Sadece Otomatik Katılım (OKS) Fonları.*")
 
 # --- SIDEBAR (AYARLAR) ---
 st.sidebar.header("⚙️ Denetim Ayarları")
@@ -39,7 +39,7 @@ def get_data(days):
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
     
-    # Veriyi çek (EMK = Emeklilik Fonları)
+    # Veriyi çek (EMK = Emeklilik Fonları - BES+OKS)
     df = crawler.fetch(start=start_str, end=end_str, kind="EMK")
     
     # Sütunları düzenle
@@ -50,6 +50,10 @@ def get_data(days):
         "date": "tarih"
     })
     
+    # --- FİLTRE: SADECE OKS FONLARI ---
+    # Fon adında "OKS" veya "OTOMATİK" geçenleri tut, gerisini at.
+    df = df[df['fonadi'].str.contains('OKS|OTOMATİK', case=False, na=False)]
+    
     # Veri Tiplerini ZORLA (Hata önleyici)
     df['tarih'] = pd.to_datetime(df['tarih'])
     df['fiyat'] = df['fiyat'].astype(float)
@@ -57,21 +61,20 @@ def get_data(days):
     return df
 
 try:
-    with st.spinner(f'Son {lookback_days} günün verileri analiz ediliyor...'):
+    with st.spinner(f'Son {lookback_days} günün OKS verileri analiz ediliyor...'):
         df = get_data(lookback_days)
 
-    # Veri Kontrolü (Hata ayıklama için bilgi)
-    date_range = df['tarih'].max() - df['tarih'].min()
-    st.info(f"📅 Analiz edilen veri aralığı: {df['tarih'].min().date()} - {df['tarih'].max().date()} ({date_range.days} Gün)")
+    if df.empty:
+        st.error("Veri bulunamadı veya tarih aralığında OKS fon verisi yok.")
+        st.stop()
 
     # --- HESAPLAMA ---
     pivot_df = df.pivot(index='tarih', columns='fonkodu', values='fiyat')
     
-    # Veri boşluklarını doldur (Hafta sonları vs için önceki günü kopyala)
+    # Veri boşluklarını doldur
     pivot_df = pivot_df.ffill().bfill()
 
-    # Getiri Hesapla: (Son Fiyat - İlk Fiyat) / İlk Fiyat
-    # Not: İlk gün ile son gün arasındaki farkı alıyoruz
+    # Getiri Hesapla
     first_prices = pivot_df.iloc[0]
     last_prices = pivot_df.iloc[-1]
     
@@ -86,25 +89,24 @@ try:
     
     # İsimleri ekle
     last_day_info = df[df['tarih'] == df['tarih'].max()][['fonkodu', 'fonadi']].set_index('fonkodu')
-    # Tekrarları önle
     last_day_info = last_day_info[~last_day_info.index.duplicated(keep='first')]
     
     league_table = league_table.join(last_day_info, on='Fon Kodu')
-    league_table = league_table[['Fon Kodu', 'fonadi', 'Getiri (%)']] # Sıralama
+    league_table = league_table[['Fon Kodu', 'fonadi', 'Getiri (%)']] 
     league_table['Getiri (%)'] = league_table['Getiri (%)'].round(2)
 
     # --- GÖRÜNÜM: LİG TABLOSU ---
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.header(f"🏆 Top 20 Getiri Ligi ({lookback_days} Gün)")
+        st.header(f"🏆 OKS Ligi ({lookback_days} Gün)")
         st.dataframe(league_table.head(20), use_container_width=True)
         
     with col2:
-        st.header("📊 Özet")
+        st.header("📊 OKS Özeti")
         if not league_table.empty:
             top_fund = league_table.iloc[0]
-            st.metric(label="🥇 Şampiyon", value=top_fund['Fon Kodu'], delta=f"%{top_fund['Getiri (%)']}")
+            st.metric(label="🥇 Şampiyon OKS", value=top_fund['Fon Kodu'], delta=f"%{top_fund['Getiri (%)']}")
             st.metric(label="Ortalama Getiri", value=f"%{league_table['Getiri (%)'].mean():.2f}")
 
     # --- GÖRÜNÜM: BENİM FONLARIM ---
@@ -135,10 +137,10 @@ try:
                 
                 # Grafik
                 fund_history = df[df['fonkodu'] == f_code]
-                fig = px.line(fund_history, x='tarih', y='fiyat', title=f'{f_code} Fiyat Grafiği')
+                fig = px.line(fund_history, x='tarih', y='fiyat', title=f'{f_code} Performansı')
                 st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("Seçilen fonlara ait veri bulunamadı.")
+        st.warning("Seçilen fonlar OKS listesinde bulunamadı. Kodları kontrol et.")
 
 except Exception as e:
     st.error(f"Hata oluştu: {e}")
