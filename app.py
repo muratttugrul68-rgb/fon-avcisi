@@ -33,11 +33,11 @@ def get_data(days):
     # Bugünden geriye 'days' kadar git
     start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     
-    # "EYF" -> Emeklilik Yatırım Fonları (BES/OKS) demektir.
-    # Bu komut ile sadece BES fonlarını çeker.
-    df = crawler.fetch(start=start_date, kind="EYF")
+    # DÜZELTME BURADA YAPILDI: "EYF" yerine "EMK" yazıldı.
+    # EMK = Emeklilik Fonları
+    df = crawler.fetch(start=start_date, kind="EMK")
     
-    # Sütun isimlerini standartlaştır (Kütüphaneden gelen İngilizce isimleri Türkçeye çevir)
+    # Sütun isimlerini standartlaştır
     df = df.rename(columns={
         "code": "fonkodu",
         "title": "fonadi",
@@ -55,10 +55,9 @@ try:
 
     # --- VERİ İŞLEME VE HESAPLAMA ---
     # Her fon için getiri hesapla
-    # 1. Pivot tablo yap: Satırlar tarih, Sütunlar fon kodu, Değerler fiyat
     pivot_df = df.pivot(index='tarih', columns='fonkodu', values='fiyat')
     
-    # 2. Yüzdesel Getiri Hesapla ((Son Fiyat - İlk Fiyat) / İlk Fiyat)
+    # Yüzdesel Getiri Hesapla
     returns = ((pivot_df.iloc[-1] - pivot_df.iloc[0]) / pivot_df.iloc[0]) * 100
     returns = returns.sort_values(ascending=False)
     
@@ -68,7 +67,7 @@ try:
         'Getiri (%)': returns.values
     })
     
-    # Fon isimlerini ekle (Son günün verisinden al)
+    # Fon isimlerini ekle
     last_day_info = df[df['tarih'] == df['tarih'].max()][['fonkodu', 'fonadi']].set_index('fonkodu')
     league_table = league_table.join(last_day_info, on='Fon Kodu')
     
@@ -110,19 +109,19 @@ try:
                 c1.metric("Getiri", f"%{f_return}", delta_color="normal")
                 c2.metric("Sıralama", f"{rank} / {total_funds}", help="Tüm BES fonları arasındaki sırası")
                 
-                # Enflasyon Kontrolü (Dönemsel tahmin: Aylık enflasyon * ay sayısı)
+                # Enflasyon Kontrolü
                 period_inflation = inflation_rate * (lookback_days / 30)
                 if f_return < period_inflation:
                     c3.error(f"⚠️ Enflasyona Yenildi! (Hedef: %{period_inflation:.1f})")
                 else:
                     c3.success("✅ Reel Kazanç Var")
                 
-                # Grafik Çiz (Seçili fon için)
+                # Grafik Çiz
                 fund_history = df[df['fonkodu'] == f_code]
                 fig = px.line(fund_history, x='tarih', y='fiyat', title=f'{f_code} Fiyat Hareketi')
                 st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("Girdiğin fon kodlarına ait veri bulunamadı. Kodları doğru yazdığından ve bunların BES/OKS fonu olduğundan emin ol.")
+        st.warning("Girdiğin fon kodları listede bulunamadı. Lütfen fon kodlarının BES/OKS fonu olduğundan emin ol.")
 
 except Exception as e:
     st.error(f"Bir hata oluştu. Lütfen şunları kontrol et:\n1. İnternet bağlantın var mı?\n2. TEFAS sunucuları yanıt veriyor mu?\n\nHata Detayı: {e}")
