@@ -2,79 +2,103 @@ import streamlit as st
 import pandas as pd
 from tefas import Crawler
 from datetime import datetime, timedelta
+import time
 import plotly.express as px
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="OKS Lite", layout="centered") # Geniş değil, odaklı görünüm
-st.title("🛡️ OKS Hızlı Kontrol")
+st.set_page_config(page_title="OKS Güvenli Mod", layout="wide")
+st.title("🛡️ OKS Fon Sistemi (Güvenli Mod)")
 
-# --- SADECE GEREKLİ AYARLAR ---
-st.info("Bu mod, bağlantı sorunlarını aşmak için basitleştirilmiştir.")
+# --- AYARLAR ---
+st.sidebar.header("⚙️ Ayarlar")
+days = st.sidebar.selectbox("Analiz Süresi:", [30, 90, 180, 365], index=0)
+user_funds_input = st.sidebar.text_input("Fonlarım:", "VGA,VEG,ALR,CHG,AH1")
+user_funds = [x.strip().upper() for x in user_funds_input.split(',')]
 
-# Tarih seçimi yok, otomatik 30 gün (En hızlısı bu)
-days = 30 
-st.write(f"📅 Analiz Aralığı: Son {days} Gün")
-
-# Senin Fonların
-my_funds = ["VGA", "VEG", "ALR", "CHG", "AH1"]
-
-# --- BASİT VERİ ÇEKME ---
-@st.cache_data(ttl=600) # 10 dakika hafızada tut
-def get_simple_data():
+# --- GÜVENLİ VERİ MOTORU ---
+@st.cache_data(ttl=600)
+def get_safe_data(lookback):
     crawler = Crawler()
+    # Hafta sonu hatasını önlemek için bitiş tarihini dünden başlatabiliriz ama
+    # biz geniş aralık alıp filtreleyeceğiz.
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
+    start_date = end_date - timedelta(days=lookback)
     
-    # Emeklilik fonlarını çek
-    try:
-        df = crawler.fetch(
-            start=start_date.strftime("%Y-%m-%d"), 
-            end=end_date.strftime("%Y-%m-%d"), 
-            kind="EMK"
-        )
-        return df
-    except Exception as e:
-        return None
+    # 3 Kere Dene (Retry Logic)
+    for _ in range(3):
+        try:
+            df = crawler.fetch(
+                start=start_date.strftime("%Y-%m-%d"), 
+                end=end_date.strftime("%Y-%m-%d"), 
+                kind="EMK"
+            )
+            if df is not None and not df.empty:
+                return df
+        except:
+            time.sleep(1)
+            continue
+    return pd.DataFrame() # Başarısızsa boş dön
 
 # --- İŞLEM ---
-with st.spinner('TEFAS ile hızlı bağlantı kuruluyor...'):
-    df = get_simple_data()
+with st.spinner('Veriler kontrol edilerek çekiliyor...'):
+    df = get_safe_data(days)
 
-if df is None or df.empty:
-    st.error("❌ TEFAS Sunucusu Cevap Vermiyor.")
-    st.warning("Bu kod hatası değil, sunucu yoğunluğudur. Lütfen 5-10 dakika sonra sayfayı yenileyin.")
-    st.stop()
+# 1. GÜVENLİK KONTROLÜ: Veri hiç geldi mi?
+if df.empty:
+    st.error("⚠️ TEFAS'tan veri çekilemedi.")
+    st.info("İpucu: Hafta sonları bazen veri geç gelir. Lütfen 'Analiz Süresi'ni değiştirip tekrar deneyin.")
+    st.stop() # UYGULAMAYI DURDUR (Çökmesini engeller)
 
-# --- VERİ GELDİYSE İŞLE ---
-# Sütunları düzelt
+# Veri Temizliği
 df = df.rename(columns={"code": "fonkodu", "title": "fonadi", "price": "fiyat", "date": "tarih"})
 df['fiyat'] = df['fiyat'].astype(float)
 df['tarih'] = pd.to_datetime(df['tarih'])
 
-# OKS Filtresi (Basit)
+# 2. GÜVENLİK KONTROLÜ: OKS Filtresi sonrası veri kalıyor mu?
 oks_df = df[df['fonadi'].str.contains('OKS|OTOMATİK', case=False, na=False)]
 
-# Getiri Hesapla
+if oks_df.empty:
+    st.warning("⚠️ Veri çekildi ama 'OKS' kriterine uyan fon bulunamadı.")
+    st.write("Tüm Emeklilik fonlarını gösteriyorum:")
+    oks_df = df # Filtreyi iptal et, en azından bir şey gösterelim.
+
+# Pivot İşlemi
 pivot = oks_df.pivot(index='tarih', columns='fonkodu', values='fiyat').ffill().bfill()
-first = pivot.iloc[0]
-last = pivot.iloc[-1]
-returns = ((last - first) / first) * 100
-returns = returns.sort_values(ascending=False)
 
-# --- SONUÇ EKRANI ---
-st.success("✅ Bağlantı Başarılı!")
+# 3. GÜVENLİK KONTROLÜ: Pivot tablosu dolu mu?
+if pivot.empty or len(pivot) < 2:
+    st.warning("⚠️ Getiri hesaplamak için yeterli tarih verisi yok (En az 2 gün gerekli).")
+    st.stop() # Çökmeden dur.
 
-# 1. Senin Fonların
-st.subheader("Senin Fonların")
-for fund in my_funds:
-    if fund in returns.index:
-        rate = returns[fund]
-        color = "green" if rate > 0 else "red"
-        st.markdown(f"**{fund}**: :{color}[%{rate:.2f}]")
-    else:
-        st.write(f"{fund}: Veri yok (OKS olmayabilir)")
+# --- HESAPLAMA (Artık buraya geldiyse veri kesin vardır) ---
+try:
+    first = pivot.iloc[0]
+    last = pivot.iloc[-1]
+    returns = ((last - first) / first) * 100
+    returns = returns.sort_values(ascending=False)
 
-# 2. Lig Tablosu (İlk 10)
-st.subheader("🏆 OKS Liderleri (Top 10)")
-top10 = pd.DataFrame({'Fon': returns.index[:10], 'Getiri (%)': returns.values[:10]})
-st.table(top10)
+    # Tablo
+    league = pd.DataFrame({'Fon Kodu': returns.index, 'Getiri (%)': returns.values})
+    
+    # İsimleri ekle
+    names = df[['fonkodu', 'fonadi']].drop_duplicates(subset='fonkodu', keep='last').set_index('fonkodu')
+    league = league.join(names, on='Fon Kodu')
+    league['Getiri (%)'] = league['Getiri (%)'].round(2)
+
+    # --- EKRAN ---
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.subheader(f"🏆 Liderlik Tablosu ({days} Gün)")
+        st.dataframe(league, use_container_width=True)
+        
+    with col2:
+        st.subheader("🔍 Senin Fonların")
+        my_data = league[league['Fon Kodu'].isin(user_funds)]
+        if not my_data.empty:
+            st.dataframe(my_data[['Fon Kodu', 'Getiri (%)']], use_container_width=True)
+        else:
+            st.info("Senin fonların bu listede yok.")
+
+except Exception as e:
+    st.error(f"Hesaplama hatası: {e}")
