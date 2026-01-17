@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
-import plotly.express as px
-from tefas import Crawler
+import requests
 
 # Sayfa ayarları
 st.set_page_config(
@@ -13,7 +12,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS - Mobil optimizasyon
+# Custom CSS
 st.markdown("""
 <style>
     .main > div {
@@ -32,49 +31,64 @@ st.title("🔍 Fon Radar")
 st.markdown("**OKS/BES Fon Performans Denetçisi**")
 st.markdown("---")
 
-# Session state başlangıç
+# Session state
 if 'benim_fonlarim' not in st.session_state:
     st.session_state.benim_fonlarim = []
 
-# TEFAS veri çekme fonksiyonu
+# TEFAS veri çekme - DİREKT API
 @st.cache_data(ttl=3600)
 def tefas_veri_cek(baslangic, bitis):
-    """TEFAS'tan tüm fonların verilerini çeker"""
+    """TEFAS API'den direkt veri çeker"""
     try:
-        crawler = Crawler()
+        url = "https://www.tefas.gov.tr/api/DB/BindHistoryAllocation"
         
-        # Tüm fonları çek
-        df_list = []
+        all_data = []
         
         # YAT (Yatırım Fonları)
-        try:
-            data = crawler.fetch(
-                start=baslangic.strftime('%d-%m-%Y'),
-                end=bitis.strftime('%d-%m-%Y')
-            )
-            if data is not None and not data.empty:
-                df_list.append(data)
-        except:
-            pass
-        
-        if df_list:
-            df = pd.concat(df_list, ignore_index=True)
-            
-            # Tarih formatı
-            if 'date' in df.columns:
-                df['TARIH'] = pd.to_datetime(df['date'])
-            
-            # Kolon isimleri standardize et
-            rename_map = {
-                'code': 'FONKOD',
-                'title': 'FONUNVAN',
-                'price': 'FIYAT',
-                'type': 'FONTIP'
+        for fontip in ['YAT', 'EMK']:
+            params = {
+                'fontip': fontip,
+                'sfontur': '',
+                'fonkod': '',
+                'bastarih': baslangic.strftime('%d.%m.%Y'),
+                'bittarih': bitis.strftime('%d.%m.%Y'),
             }
             
-            for old, new in rename_map.items():
-                if old in df.columns:
-                    df[new] = df[old]
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json',
+                'Accept-Language': 'tr-TR,tr;q=0.9',
+            }
+            
+            try:
+                response = requests.get(url, params=params, headers=headers, timeout=30)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    if 'data' in data and data['data']:
+                        df_temp = pd.DataFrame(data['data'])
+                        all_data.append(df_temp)
+            except:
+                continue
+        
+        if all_data:
+            df = pd.concat(all_data, ignore_index=True)
+            
+            # Tarih formatı
+            df['TARIH'] = pd.to_datetime(df['TARIH'], format='%d-%m-%Y', errors='coerce')
+            
+            # Sayısal kolonlar
+            numeric_cols = ['FIYAT', 'TEDPAYSAYISI', 'PORTFOYBUYUKLUK']
+            for col in numeric_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(
+                        df[col].astype(str).str.replace(',', '.'),
+                        errors='coerce'
+                    )
+            
+            # Null değerleri temizle
+            df = df.dropna(subset=['TARIH', 'FIYAT', 'FONKOD'])
             
             return df
         
@@ -84,9 +98,9 @@ def tefas_veri_cek(baslangic, bitis):
         st.error(f"Veri çekme hatası: {str(e)}")
         return pd.DataFrame()
 
-# Getiri ve analiz hesaplama
+# Gelişmiş analiz
 def gelismis_analiz(df, gun):
-    """Gelişmiş performans analizi"""
+    """15 özelliği içeren tam analiz"""
     try:
         son_tarih = df['TARIH'].max()
         baslangic_tarih = son_tarih - timedelta(days=gun)
@@ -96,78 +110,86 @@ def gelismis_analiz(df, gun):
         for fonkod in df['FONKOD'].unique():
             fon_df = df[df['FONKOD'] == fonkod].sort_values('TARIH')
             
+            if len(fon_df) < 2:
+                continue
+            
             # Son fiyat
-            son_fiyat = fon_df[fon_df['TARIH'] == son_tarih]['FIYAT'].values
+            son_kayit = fon_df[fon_df['TARIH'] == son_tarih]
+            if son_kayit.empty:
+                son_kayit = fon_df.iloc[-1:]
+            
+            son_fiyat = son_kayit['FIYAT'].values[0]
             
             # Başlangıç fiyatı
             baslangic_df = fon_df[fon_df['TARIH'] >= baslangic_tarih]
             
-            if len(son_fiyat) > 0 and len(baslangic_df) > 0:
-                baslangic_fiyat = baslangic_df.iloc[0]['FIYAT']
-                son_fiyat_val = son_fiyat[0]
+            if len(baslangic_df) == 0:
+                continue
+            
+            baslangic_fiyat = baslangic_df.iloc[0]['FIYAT']
+            
+            if baslangic_fiyat <= 0 or pd.isna(baslangic_fiyat):
+                continue
+            
+            # 1. Getiri
+            getiri = ((son_fiyat - baslangic_fiyat) / baslangic_fiyat) * 100
+            
+            # 6. Momentum
+            son_7gun_tarih = son_tarih - timedelta(days=7)
+            son_7gun_df = fon_df[fon_df['TARIH'] >= son_7gun_tarih]
+            
+            momentum = "📊"
+            if len(son_7gun_df) >= 2:
+                son_7_baslangic = son_7gun_df.iloc[0]['FIYAT']
+                if son_7_baslangic > 0:
+                    son_7_getiri = ((son_fiyat - son_7_baslangic) / son_7_baslangic) * 100
+                    oran = abs(son_7_getiri) / (abs(getiri) / (gun / 7)) if getiri != 0 else 1
+                    momentum = "📈" if son_7_getiri > 0 and oran > 0.8 else "📉"
+            
+            # 14. Drawdown
+            fiyatlar = baslangic_df['FIYAT'].values
+            max_dusus = 0
+            
+            if len(fiyatlar) > 0:
+                zirve = fiyatlar[0]
+                for fiyat in fiyatlar:
+                    if fiyat > zirve:
+                        zirve = fiyat
+                    if zirve > 0:
+                        dusus = ((zirve - fiyat) / zirve) * 100
+                        if dusus > max_dusus:
+                            max_dusus = dusus
+            
+            # 12. Risk (volatilite)
+            if len(baslangic_df) > 2:
+                gunluk_getiriler = baslangic_df['FIYAT'].pct_change().dropna()
+                volatilite = gunluk_getiriler.std() * 100
                 
-                if baslangic_fiyat > 0:
-                    # 1. Getiri
-                    getiri = ((son_fiyat_val - baslangic_fiyat) / baslangic_fiyat) * 100
-                    
-                    # 6. Momentum (son 7 gün vs genel trend)
-                    son_7gun_tarih = son_tarih - timedelta(days=7)
-                    son_7gun_df = fon_df[fon_df['TARIH'] >= son_7gun_tarih]
-                    
-                    momentum = "📈"
-                    if len(son_7gun_df) >= 2:
-                        son_7_baslangic = son_7gun_df.iloc[0]['FIYAT']
-                        son_7_getiri = ((son_fiyat_val - son_7_baslangic) / son_7_baslangic) * 100
-                        
-                        oran = son_7_getiri / (getiri / (gun / 7)) if getiri != 0 else 1
-                        momentum = "📈" if oran > 1 else "📉"
-                    
-                    # 14. Drawdown (Maksimum düşüş)
-                    fiyatlar = baslangic_df['FIYAT'].values
-                    max_dusus = 0
-                    
-                    if len(fiyatlar) > 0:
-                        zirve = fiyatlar[0]
-                        for fiyat in fiyatlar:
-                            if fiyat > zirve:
-                                zirve = fiyat
-                            dusus = ((zirve - fiyat) / zirve) * 100
-                            if dusus > max_dusus:
-                                max_dusus = dusus
-                    
-                    # Fon bilgileri
-                    son_kayit = fon_df.iloc[-1]
-                    
-                    # 12. Risk seviyesi (volatilite bazlı basit hesap)
-                    if len(baslangic_df) > 1:
-                        gunluk_getiriler = baslangic_df['FIYAT'].pct_change().dropna()
-                        volatilite = gunluk_getiriler.std() * 100
-                        
-                        if volatilite < 0.5:
-                            risk = "Düşük"
-                            risk_skor = 1
-                        elif volatilite < 1.0:
-                            risk = "Orta"
-                            risk_skor = 2
-                        else:
-                            risk = "Yüksek"
-                            risk_skor = 3
-                    else:
-                        risk = "Bilinmiyor"
-                        risk_skor = 0
-                    
-                    sonuclar.append({
-                        'FONKOD': fonkod,
-                        'FONUNVAN': son_kayit['FONUNVAN'],
-                        'FIYAT': son_fiyat_val,
-                        'GETIRI': getiri,
-                        'MOMENTUM': momentum,
-                        'DRAWDOWN': max_dusus,
-                        'RISK': risk,
-                        'RISK_SKOR': risk_skor,
-                        'FONTIP': son_kayit.get('FONTIP', 'Bilinmiyor'),
-                        'FIYAT_DATA': fiyatlar.tolist()
-                    })
+                if volatilite < 0.5:
+                    risk = "Düşük"
+                    risk_skor = 1
+                elif volatilite < 1.0:
+                    risk = "Orta"
+                    risk_skor = 2
+                else:
+                    risk = "Yüksek"
+                    risk_skor = 3
+            else:
+                risk = "Bilinmiyor"
+                risk_skor = 0
+            
+            sonuclar.append({
+                'FONKOD': fonkod,
+                'FONUNVAN': son_kayit['FONUNVAN'].values[0],
+                'FIYAT': son_fiyat,
+                'GETIRI': getiri,
+                'MOMENTUM': momentum,
+                'DRAWDOWN': max_dusus,
+                'RISK': risk,
+                'RISK_SKOR': risk_skor,
+                'FONTIP': son_kayit.get('FONTIP', pd.Series(['Bilinmiyor'])).values[0],
+                'FIYAT_DATA': fiyatlar.tolist()
+            })
         
         return pd.DataFrame(sonuclar)
     
@@ -178,7 +200,7 @@ def gelismis_analiz(df, gun):
 # Sidebar
 st.sidebar.header("⚙️ Ayarlar")
 
-# 3. Dinamik Süre Seçimi
+# 3. Süre seçimi
 sure_secimi = st.sidebar.selectbox(
     "📅 Analiz Dönemi",
     ["Son 7 Gün", "Son 30 Gün", "Son 90 Gün"],
@@ -193,7 +215,7 @@ gun_mapping = {
 
 secili_gun = gun_mapping[sure_secimi]
 
-# 13. Reel Getiri Kontrolü (Manuel)
+# 13. Reel getiri
 st.sidebar.markdown("---")
 st.sidebar.subheader("💰 Kıyaslama")
 
@@ -202,8 +224,7 @@ enflasyon = st.sidebar.number_input(
     min_value=0.0,
     max_value=200.0,
     value=65.0,
-    step=1.0,
-    help="TÜİK verisi - Manuel güncelleme gerekir"
+    step=1.0
 )
 
 mevduat = st.sidebar.number_input(
@@ -211,20 +232,22 @@ mevduat = st.sidebar.number_input(
     min_value=0.0,
     max_value=100.0,
     value=50.0,
-    step=1.0,
-    help="Bankalardan ortalama faiz"
+    step=1.0
 )
 
 # Veri çekme
-with st.spinner('📊 TEFAS verisi çekiliyor...'):
+with st.spinner('📊 TEFAS verisi çekiliyor... (30-60 saniye sürebilir)'):
     bugun = datetime.now()
     baslangic = bugun - timedelta(days=secili_gun + 15)
     
     df_ham = tefas_veri_cek(baslangic, bugun)
 
 if df_ham.empty:
-    st.error("❌ TEFAS verisi çekilemedi. Lütfen daha sonra tekrar deneyin.")
-    st.info("💡 İnternet bağlantınızı kontrol edin veya birkaç dakika sonra tekrar deneyin.")
+    st.error("❌ TEFAS verisi çekilemedi.")
+    st.info("💡 Olası nedenler:")
+    st.write("- TEFAS API'si geçici olarak erişilemez durumda")
+    st.write("- İnternet bağlantınızda sorun var")
+    st.write("- API limiti aşıldı (1-2 dakika bekleyip tekrar deneyin)")
     st.stop()
 
 # Analiz
@@ -232,23 +255,25 @@ with st.spinner('🔢 Gelişmiş analiz yapılıyor...'):
     df_analiz = gelismis_analiz(df_ham, secili_gun)
 
 if df_analiz.empty:
-    st.error("❌ Analiz yapılamadı.")
+    st.error("❌ Analiz yapılamadı. Veri yetersiz.")
     st.stop()
 
-# 2. Kategori Filtresi
+# Başarı mesajı
+st.success(f"✅ {len(df_analiz)} fon analiz edildi!")
+
+# 2. Kategori filtresi
 kategoriler = ['Tümü'] + sorted(df_analiz['FONTIP'].unique().tolist())
 secili_kategori = st.sidebar.selectbox(
     "📂 Kategori",
     kategoriler
 )
 
-# Filtreleme
 if secili_kategori != 'Tümü':
     df_filtre = df_analiz[df_analiz['FONTIP'] == secili_kategori].copy()
 else:
     df_filtre = df_analiz.copy()
 
-# 11. Sıralama Modları
+# 11. Sıralama
 st.sidebar.markdown("---")
 siralama_modu = st.sidebar.radio(
     "🔢 Sıralama",
@@ -267,11 +292,10 @@ else:
 df_filtre = df_filtre.reset_index(drop=True)
 df_filtre['SIRA'] = df_filtre.index + 1
 
-# 7. Kategori Ortalaması
+# 7. Kategori ortalaması
 ort_getiri = df_filtre['GETIRI'].mean()
-medyan_getiri = df_filtre['GETIRI'].median()
 
-# Ana ekran metrikleri
+# Metrikler
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
@@ -281,27 +305,20 @@ with col2:
     st.metric("📈 Ortalama Getiri", f"%{ort_getiri:.2f}")
 
 with col3:
-    en_iyi = df_filtre['GETIRI'].max()
-    st.metric("🥇 En İyi", f"%{en_iyi:.2f}")
+    st.metric("🥇 En İyi", f"%{df_filtre['GETIRI'].max():.2f}")
 
 with col4:
-    en_kotu = df_filtre['GETIRI'].min()
-    st.metric("📉 En Kötü", f"%{en_kotu:.2f}")
+    st.metric("📉 En Kötü", f"%{df_filtre['GETIRI'].min():.2f}")
 
 st.markdown("---")
 
-# 4. "Benim Fonlarım" Paneli
+# 4. Benim fonlarım
 st.subheader("💼 Benim Fonlarım")
 
 col_fon1, col_fon2 = st.columns([3, 1])
 
 with col_fon1:
-    yeni_fon = st.text_input(
-        "Fon kodu ekle (örn: ABC)",
-        "",
-        key="fon_input",
-        help="Takip etmek istediğin fonun kodunu yaz"
-    )
+    yeni_fon = st.text_input("Fon kodu ekle:", "", key="fon_input")
 
 with col_fon2:
     if st.button("➕ Ekle", use_container_width=True):
@@ -313,11 +330,11 @@ with col_fon2:
                     st.success(f"✅ {yeni_fon_upper} eklendi!")
                     st.rerun()
                 else:
-                    st.warning("⚠️ Bu fon zaten listede!")
+                    st.warning("⚠️ Zaten listede!")
             else:
                 st.error("❌ Fon bulunamadı!")
 
-# 5. Lig Sıralaması - Benim fonlarımın durumu
+# 5. Lig sıralaması
 if st.session_state.benim_fonlarim:
     st.markdown("#### 📍 Portföy Durumu")
     
@@ -330,60 +347,50 @@ if st.session_state.benim_fonlarim:
             col_a, col_b, col_c = st.columns([2, 1, 1])
             
             with col_a:
-                st.markdown(f"**{fon['FONKOD']}** - {fon['FONUNVAN'][:50]}")
+                st.markdown(f"**{fon['FONKOD']}** - {fon['FONUNVAN'][:40]}")
             
             with col_b:
                 getiri_renk = "🟢" if fon['GETIRI'] > ort_getiri else "🔴"
-                st.metric(
-                    "Getiri",
-                    f"%{fon['GETIRI']:.2f}",
-                    f"{getiri_renk} Ort: %{ort_getiri:.2f}"
-                )
+                st.metric("Getiri", f"%{fon['GETIRI']:.2f}", f"{getiri_renk}")
             
             with col_c:
-                toplam_fon = len(df_filtre)
                 sira = fon['SIRA']
-                yuzde = (sira / toplam_fon) * 100
+                toplam = len(df_filtre)
+                yuzde = (sira / toplam) * 100
                 
                 if yuzde <= 20:
-                    durum = "🥇 Üst %20"
+                    durum = "🥇"
                 elif yuzde <= 50:
-                    durum = "✅ Üst Yarı"
-                elif yuzde <= 80:
-                    durum = "⚠️ Alt Yarı"
+                    durum = "✅"
                 else:
-                    durum = "🚨 Alt %20"
+                    durum = "⚠️"
                 
-                st.metric("Sıralama", f"{sira}/{toplam_fon}", durum)
+                st.metric("Sıra", f"{sira}/{toplam}", durum)
             
-            # 13. Reel Getiri Kontrolü
-            yillik_getiri = (fon['GETIRI'] / secili_gun) * 365
-            
+            # 13. Reel getiri
+            yillik = (fon['GETIRI'] / secili_gun) * 365
             col_d, col_e, col_f = st.columns(3)
             
             with col_d:
-                vs_enf = yillik_getiri - enflasyon
-                renk_enf = "🟢" if vs_enf > 0 else "🔴"
-                st.caption(f"{renk_enf} Enflasyon: {vs_enf:+.1f}%")
+                vs_enf = yillik - enflasyon
+                st.caption(f"{'🟢' if vs_enf > 0 else '🔴'} vs Enf: {vs_enf:+.1f}%")
             
             with col_e:
-                vs_mev = yillik_getiri - mevduat
-                renk_mev = "🟢" if vs_mev > 0 else "🔴"
-                st.caption(f"{renk_mev} Mevduat: {vs_mev:+.1f}%")
+                vs_mev = yillik - mevduat
+                st.caption(f"{'🟢' if vs_mev > 0 else '🔴'} vs Mev: {vs_mev:+.1f}%")
             
             with col_f:
                 st.caption(f"⚠️ Risk: {fon['RISK']}")
             
-            # Silme butonu
-            if st.button(f"🗑️ Kaldır", key=f"remove_{fon_kod}"):
+            if st.button(f"🗑️", key=f"remove_{fon_kod}"):
                 st.session_state.benim_fonlarim.remove(fon_kod)
                 st.rerun()
             
             st.markdown("---")
 
-# 10. Hızlı Arama
+# 10. Arama
 st.subheader("🔍 Hızlı Arama")
-arama = st.text_input("Fon kodu veya adı ile ara:", "")
+arama = st.text_input("Fon ara:", "")
 
 if arama:
     df_filtre_arama = df_filtre[
@@ -393,15 +400,14 @@ if arama:
 else:
     df_filtre_arama = df_filtre
 
-# 9. Top 10 Hızlı Liste
+# 9. Top 10
 st.subheader("🏆 En İyi 10 Fon")
 df_top10 = df_filtre_arama.head(10).copy()
 
-# Tablo
-df_goster = df_top10[['SIRA', 'FONKOD', 'FONUNVAN', 'GETIRI', 'MOMENTUM', 'RISK', 'DRAWDOWN', 'FIYAT']].copy()
+df_goster = df_top10[['SIRA', 'FONKOD', 'FONUNVAN', 'GETIRI', 'MOMENTUM', 'RISK', 'DRAWDOWN']].copy()
 df_goster['GETIRI'] = df_goster['GETIRI'].apply(lambda x: f"%{x:.2f}")
 df_goster['DRAWDOWN'] = df_goster['DRAWDOWN'].apply(lambda x: f"%{x:.1f}")
-df_goster['FIYAT'] = df_goster['FIYAT'].apply(lambda x: f"{x:.4f} TL")
+df_goster['FONUNVAN'] = df_goster['FONUNVAN'].apply(lambda x: x[:50])
 
 st.dataframe(
     df_goster,
@@ -410,21 +416,20 @@ st.dataframe(
     column_config={
         "SIRA": "Sıra",
         "FONKOD": "Kod",
-        "FONUNVAN": "Fon Adı",
+        "FONUNVAN": "Fon",
         "GETIRI": "Getiri",
         "MOMENTUM": "Trend",
         "RISK": "Risk",
-        "DRAWDOWN": "Max Düşüş",
-        "FIYAT": "Fiyat"
+        "DRAWDOWN": "Max Düşüş"
     }
 )
 
-# 8. İnteraktif Grafik
+# 8. Grafik
 st.markdown("---")
 st.subheader("📈 Performans Grafiği")
 
 secili_fonlar = st.multiselect(
-    "Karşılaştırmak için fon seç (max 5):",
+    "Karşılaştır (max 5):",
     df_top10['FONKOD'].tolist(),
     default=[df_top10.iloc[0]['FONKOD']] if len(df_top10) > 0 else []
 )
@@ -437,7 +442,6 @@ if secili_fonlar and len(secili_fonlar) <= 5:
         fiyatlar = fon_data['FIYAT_DATA']
         
         if len(fiyatlar) > 0:
-            # Normalize et (100 bazlı)
             baslangic = fiyatlar[0]
             normalize = [(f / baslangic) * 100 for f in fiyatlar]
             
@@ -449,45 +453,31 @@ if secili_fonlar and len(secili_fonlar) <= 5:
             ))
     
     fig.update_layout(
-        title="Fon Performans Karşılaştırması (100 Bazlı)",
+        title="Performans (100 Bazlı)",
         xaxis_title="Gün",
-        yaxis_title="İndeks (Başlangıç=100)",
+        yaxis_title="İndeks",
         hovermode='x unified',
         height=400
     )
     
     st.plotly_chart(fig, use_container_width=True)
 
-elif len(secili_fonlar) > 5:
-    st.warning("⚠️ En fazla 5 fon seçebilirsiniz")
-
-# Tüm fonlar tablosu
+# Tüm fonlar
 st.markdown("---")
 st.subheader("📊 Tüm Fonlar")
 
 df_tumfonlar = df_filtre_arama.copy()
 df_tumfonlar['GETIRI'] = df_tumfonlar['GETIRI'].apply(lambda x: f"%{x:.2f}")
 df_tumfonlar['DRAWDOWN'] = df_tumfonlar['DRAWDOWN'].apply(lambda x: f"%{x:.1f}")
-df_tumfonlar['FIYAT'] = df_tumfonlar['FIYAT'].apply(lambda x: f"{x:.4f} TL")
 
 st.dataframe(
-    df_tumfonlar[['SIRA', 'FONKOD', 'FONUNVAN', 'GETIRI', 'MOMENTUM', 'RISK', 'DRAWDOWN']],
+    df_tumfonlar[['SIRA', 'FONKOD', 'FONUNVAN', 'GETIRI', 'MOMENTUM', 'RISK']],
     use_container_width=True,
     hide_index=True,
-    height=400,
-    column_config={
-        "SIRA": "Sıra",
-        "FONKOD": "Kod",
-        "FONUNVAN": "Fon Adı",
-        "GETIRI": "Getiri",
-        "MOMENTUM": "Trend",
-        "RISK": "Risk",
-        "DRAWDOWN": "Max Düşüş"
-    }
+    height=400
 )
 
-# 15. Veri Tazelik Damgası - Footer
+# 15. Footer
 st.markdown("---")
 son_guncelleme = df_ham['TARIH'].max().strftime('%d.%m.%Y')
-st.caption(f"📅 Son Güncelleme: {son_guncelleme} | 🔍 Fon Radar v2.0 | Veri: TEFAS")
-st.caption("⚠️ Geçmiş performans gelecek performansın garantisi değildir. Yatırım kararlarınızı danışman desteği ile alın.")
+st.caption(f"📅 Son Güncelleme: {son_guncelleme} | 🔍 Fon Radar v2.0")
