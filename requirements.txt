@@ -1,4 +1,4 @@
 streamlit
 pandas
-tefas-crawler
 plotly
+requests
