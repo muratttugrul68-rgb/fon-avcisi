@@ -3,30 +3,30 @@ import pandas as pd
 from tefas import Crawler
 from datetime import datetime, timedelta
 import time
-import plotly.express as px
 
-# --- SAYFA AYARLARI ---
-st.set_page_config(page_title="OKS Güvenli Mod", layout="wide")
-st.title("🛡️ OKS Fon Sistemi (Güvenli Mod)")
+# --- SAYFA ---
+st.set_page_config(page_title="OKS Tanı Modu", layout="wide")
+st.title("🛡️ OKS Veri Röntgeni")
 
 # --- AYARLAR ---
-st.sidebar.header("⚙️ Ayarlar")
-days = st.sidebar.selectbox("Analiz Süresi:", [30, 90, 180, 365], index=0)
-user_funds_input = st.sidebar.text_input("Fonlarım:", "VGA,VEG,ALR,CHG,AH1")
-user_funds = [x.strip().upper() for x in user_funds_input.split(',')]
+st.sidebar.header("Ayarlar")
+# Güvenli olsun diye 30 günü seçili getiriyorum
+days = st.sidebar.selectbox("Süre:", [30, 90, 180], index=0) 
 
-# --- GÜVENLİ VERİ MOTORU ---
+# Senin Fonların (Filtre çalışmasa bile bunları zorla bulacağız)
+my_codes_input = st.sidebar.text_input("Fon Kodların:", "VGA,VEG,ALR,CHG,AH1")
+my_codes = [x.strip().upper() for x in my_codes_input.split(',')]
+
+# --- VERİ ÇEKME ---
 @st.cache_data(ttl=600)
-def get_safe_data(lookback):
+def get_data_diagnostic(lookback):
     crawler = Crawler()
-    # Hafta sonu hatasını önlemek için bitiş tarihini dünden başlatabiliriz ama
-    # biz geniş aralık alıp filtreleyeceğiz.
     end_date = datetime.now()
     start_date = end_date - timedelta(days=lookback)
     
-    # 3 Kere Dene (Retry Logic)
-    for _ in range(3):
+    for _ in range(3): # 3 Kere Dene
         try:
+            # kind="EMK" -> Emeklilik (BES+OKS)
             df = crawler.fetch(
                 start=start_date.strftime("%Y-%m-%d"), 
                 end=end_date.strftime("%Y-%m-%d"), 
@@ -37,68 +37,68 @@ def get_safe_data(lookback):
         except:
             time.sleep(1)
             continue
-    return pd.DataFrame() # Başarısızsa boş dön
+    return pd.DataFrame()
 
 # --- İŞLEM ---
-with st.spinner('Veriler kontrol edilerek çekiliyor...'):
-    df = get_safe_data(days)
+with st.spinner('TEFAS deposuna giriliyor...'):
+    df = get_data_diagnostic(days)
 
-# 1. GÜVENLİK KONTROLÜ: Veri hiç geldi mi?
+# 1. KONTROL: Depo boş mu?
 if df.empty:
-    st.error("⚠️ TEFAS'tan veri çekilemedi.")
-    st.info("İpucu: Hafta sonları bazen veri geç gelir. Lütfen 'Analiz Süresi'ni değiştirip tekrar deneyin.")
-    st.stop() # UYGULAMAYI DURDUR (Çökmesini engeller)
+    st.error("❌ Depo boş döndü. (TEFAS yanıt vermedi).")
+    st.stop()
 
-# Veri Temizliği
+# Veri temizliği
 df = df.rename(columns={"code": "fonkodu", "title": "fonadi", "price": "fiyat", "date": "tarih"})
 df['fiyat'] = df['fiyat'].astype(float)
 df['tarih'] = pd.to_datetime(df['tarih'])
 
-# 2. GÜVENLİK KONTROLÜ: OKS Filtresi sonrası veri kalıyor mu?
-oks_df = df[df['fonadi'].str.contains('OKS|OTOMATİK', case=False, na=False)]
+st.success(f"✅ Başarılı! Toplam {len(df['fonkodu'].unique())} adet emeklilik fonu çekildi.")
 
-if oks_df.empty:
-    st.warning("⚠️ Veri çekildi ama 'OKS' kriterine uyan fon bulunamadı.")
-    st.write("Tüm Emeklilik fonlarını gösteriyorum:")
-    oks_df = df # Filtreyi iptal et, en azından bir şey gösterelim.
+# --- FİLTRELEME TESTİ ---
+st.markdown("---")
+col1, col2 = st.columns(2)
 
-# Pivot İşlemi
-pivot = oks_df.pivot(index='tarih', columns='fonkodu', values='fiyat').ffill().bfill()
-
-# 3. GÜVENLİK KONTROLÜ: Pivot tablosu dolu mu?
-if pivot.empty or len(pivot) < 2:
-    st.warning("⚠️ Getiri hesaplamak için yeterli tarih verisi yok (En az 2 gün gerekli).")
-    st.stop() # Çökmeden dur.
-
-# --- HESAPLAMA (Artık buraya geldiyse veri kesin vardır) ---
-try:
-    first = pivot.iloc[0]
-    last = pivot.iloc[-1]
-    returns = ((last - first) / first) * 100
-    returns = returns.sort_values(ascending=False)
-
-    # Tablo
-    league = pd.DataFrame({'Fon Kodu': returns.index, 'Getiri (%)': returns.values})
+# SENİN FONLARINI ARA (İsminde OKS yazmasa bile bulur)
+with col1:
+    st.subheader("🔍 Senin Fonların")
+    my_funds_df = df[df['fonkodu'].isin(my_codes)]
     
-    # İsimleri ekle
-    names = df[['fonkodu', 'fonadi']].drop_duplicates(subset='fonkodu', keep='last').set_index('fonkodu')
-    league = league.join(names, on='Fon Kodu')
-    league['Getiri (%)'] = league['Getiri (%)'].round(2)
+    if not my_funds_df.empty:
+        # Son günün fiyatını al
+        last_date = my_funds_df['tarih'].max()
+        display_df = my_funds_df[my_funds_df['tarih'] == last_date][['fonkodu', 'fonadi', 'fiyat']]
+        st.dataframe(display_df, use_container_width=True)
+    else:
+        st.warning("Senin yazdığın kodlar (VGA, CHG vb.) listede bulunamadı.")
 
-    # --- EKRAN ---
-    col1, col2 = st.columns([2, 1])
+# GENEL OKS ARAMASI
+with col2:
+    st.subheader("🔎 Sistemdeki 'OKS' Fonları")
+    # Filtreyi esnetiyoruz: Sadece 'OKS' değil, 'OTOMATİK' veya 'KATILIM' da arayalım
+    oks_mask = df['fonadi'].str.contains('OKS|OTOMATİK|KATILIM Standart|Agresif', case=False, na=False)
+    oks_list = df[oks_mask]
     
-    with col1:
-        st.subheader(f"🏆 Liderlik Tablosu ({days} Gün)")
-        st.dataframe(league, use_container_width=True)
-        
-    with col2:
-        st.subheader("🔍 Senin Fonların")
-        my_data = league[league['Fon Kodu'].isin(user_funds)]
-        if not my_data.empty:
-            st.dataframe(my_data[['Fon Kodu', 'Getiri (%)']], use_container_width=True)
-        else:
-            st.info("Senin fonların bu listede yok.")
+    if not oks_list.empty:
+        last_date = oks_list['tarih'].max()
+        oks_show = oks_list[oks_list['tarih'] == last_date][['fonkodu', 'fonadi']].drop_duplicates()
+        st.write(f"Toplam {len(oks_show)} adet OKS benzeri fon bulundu.")
+        st.dataframe(oks_show.head(10), use_container_width=True) # İlk 10 tanesini göster
+    else:
+        st.error("İsminde 'OKS' geçen fon bulunamadı.")
+        st.info("Aşağıda veritabanından rastgele 5 fon ismi gösteriyorum, bak bakalım isimleri nasıl yazmışlar?")
+        st.table(df[['fonkodu', 'fonadi']].drop_duplicates().head(5))
 
-except Exception as e:
-    st.error(f"Hesaplama hatası: {e}")
+# --- GETİRİ HESABI (Varsa) ---
+if not my_funds_df.empty:
+    st.markdown("---")
+    st.subheader("📈 Senin Fonlarının Getirisi")
+    pivot = my_funds_df.pivot(index='tarih', columns='fonkodu', values='fiyat').ffill().bfill()
+    
+    if len(pivot) > 1:
+        first = pivot.iloc[0]
+        last = pivot.iloc[-1]
+        ret = ((last - first) / first) * 100
+        st.bar_chart(ret)
+    else:
+        st.warning("Getiri hesabı için tarih aralığı yetersiz (Veri tek günlük olabilir).")
